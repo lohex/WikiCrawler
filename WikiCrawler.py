@@ -79,14 +79,14 @@ class KnowledgeNet(DynamicClass):
         
     def startScan(self,start_at,depth=3,skip=[],skip_rules=[]):
         parts = start_at.split(':')
-        self.category_tree = {start_at:'root'}
+        self.category_tree = {start_at:self.root}
         dn_art,dn_cat = self.scanLevel(start_at,0,skip=skip,skip_rules=skip_rules)
         self.log('Scanned on level 0: found %d pages and %d subcategories.'%(dn_art,dn_cat))
         for d in range(1,depth):
             found = self.crawlDeeper(skip=skip,skip_rules=skip_rules)
             if found == 0:
                 break
-
+        self.finalReport()
 
     def scanLevel(self,category,lvl,skip=[],skip_rules=[]):
         cat_page = self.html_wiki.page(category)
@@ -144,63 +144,63 @@ class KnowledgeNet(DynamicClass):
         return new_categories
 
     def collect(self,links=True,text=False,ignore=[],ignore_rules=[]):
-            lnks = 0
-            start = time()
-            total = len(self.articles)
+        lnks = 0
+        start = time()
+        total = len(self.articles)
             
-            for i,p in enumerate(self.articles.keys()):
+        for i,p in enumerate(self.articles.keys()):
                 
-                cat_heridity = self.retriveCategories(p)
-                page = self.html_wiki.page(p)
-                have_cat = set(cat_heridity).union(page.categories.keys())
+            cat_heridity = self.retriveCategories(p)
+            page = self.html_wiki.page(p)
+            have_cat = set(cat_heridity).union(page.categories.keys())
                 
-                ignore_by_rule = False
-                for cat in have_cat:
-                    for rule in ignore_rules:
-                        if re.match(rule,cat):
-                            ignore_by_rule = True
+            ignore_by_rule = False
+            for cat in have_cat:
+                for rule in ignore_rules:
+                    if re.match(rule,cat):
+                        ignore_by_rule = True
                             
-                bad_cat = have_cat.intersection(ignore)
-                if ignore_by_rule or len(bad_cat) > 0:
-                    #self.log('skipp article %s by categories'%(p))
-                    self.skipped.append(p)
-                else:
-                    self.collectArticle(p,links=links,text=text)
-                    if links:
-                        lnks += len(self.links[p])
+            bad_cat = have_cat.intersection(ignore)
+            if ignore_by_rule or len(bad_cat) > 0:
+                self.log('skipp article %s by categories'%(p))
+                self.skipped.append(p)
+            else:
+                self.collectArticle(p,links=links,text=text)
+                if links:
+                    lnks += len(self.links[p])
                             
-                if i%10 == 0 or i+1 == len(self.articles):         
-                    bar = '='*int(np.ceil((i+1)/total*30))
+            if i%10 == 0 or i+1 == len(self.articles):         
+                bar = '='*int(np.ceil((i+1)/total*30))
                     
-                    now = time()
-                    diff = np.round(now-start)
-                    pro = (i+1)/total
-                    wait = np.round((1-pro)/pro*diff)
-                    run_time = f'{diff} s'
-                    if diff > 60:
-                        mins = int(diff//60)
-                        rest = int(diff%60)
-                        run_time = f'{mins} min {rest:02d} s'
-                    wait_time = f'{wait} s'
-                    if wait > 60:
-                        mins = int(wait//60)
-                        rest = int(wait%60)
-                        wait_time = f'{mins} min {rest:02d} s'
+                now = time()
+                diff = np.round(now-start)
+                pro = (i+1)/total
+                wait = np.round((1-pro)/pro*diff)
+                run_time = f'{diff} s'
+                if diff > 60:
+                    mins = int(diff//60)
+                    rest = int(diff%60)
+                    run_time = f'{mins} min {rest:02d} s'
+                wait_time = f'{wait} s'
+                if wait > 60:
+                    mins = int(wait//60)
+                    rest = int(wait%60)
+                    wait_time = f'{mins} min {rest:02d} s'
                     
-                    info = f'Collecting: [{bar:<30}] {int(pro*100):3d} % ({i+1}/{total} pages)'
-                    info += f'\n running: {run_time} ; remaining: {wait_time} s \n'
-                    if links:
-                        info += f' {lnks} links'
-                    if text:
-                        size = getsizeof(self.pages)
-                        oom = int(np.log(size)//np.log(1024))
-                        size /= 1024**oom
-                        unit = ['B','KB','MB','GB'][oom]
-                        info += f' {size:.2f} {unit} of text'
-                    if len(self.skipped) > 0:
-                        info += f' {len(self.skipped)} skipped'
-                    self.printStatus(info)
-
+                info = f'Collecting: [{bar:<30}] {int(pro*100):3d} % ({i+1}/{total} pages)'
+                info += f'\n running: {run_time} ; remaining: {wait_time} s \n'
+                if links:
+                    info += f' {lnks} links'
+                if text:
+                    size = getsizeof(self.pages)
+                    oom = int(np.log(size)//np.log(1024))
+                    size /= 1024**oom
+                    unit = ['B','KB','MB','GB'][oom]
+                    info += f' {size:.2f} {unit} of text'
+                if len(self.skipped) > 0:
+                    info += f' {len(self.skipped)} skipped'
+                self.printStatus(info)
+        self.finalReport()
     
     def collectArticle(self,p,links=False,text=False,page=None):
         for tried in range(3):
@@ -241,7 +241,7 @@ class KnowledgeNet(DynamicClass):
     def printCategoryTree(self,max_lvl=None):
         if type(max_lvl) == type(None):
             max_lvl = max(self.articles.values())
-        self.printSubcats('root',0,max_lvl)
+        self.printSubcats(self.root,0,max_lvl)
         
     def printSubcats(self,cat,lvl,max_lvl):
         subcats = [c for c,p in self.category_tree.items() if p == cat]
@@ -257,7 +257,7 @@ class KnowledgeNet(DynamicClass):
     
     def retriveCategories(self,article):
         ancestors = [self.category_tree[article]]
-        while ancestors[-1] != 'root':
+        while ancestors[-1] != self.root:
             ancestors.append(self.category_tree[ancestors[-1]])
             
         return list(reversed(ancestors))[1:]
@@ -299,5 +299,8 @@ class KnowledgeNet(DynamicClass):
         self.logging.append(message)
         self.printStatus(None)
         
-
-        
+    def finalReport(self,job_title):
+        self.printStatus()
+        self.protocol.append({'job_title':self.logging})
+        self.logging = []
+                
