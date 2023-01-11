@@ -60,13 +60,14 @@ class KnowledgeNet(DynamicClass):
         self.taskLogStart = 0
         self.verbose = 1
         
-        #self.protocol = []
         self.skipped = []
+        self.skip_rules = []
         self.root = []
         
         self.articles = {}
         self.open_categories = {}
         self.category_tree = {}
+        self.closed_categories = []
         
         self.links = {}
         self.pages = {}
@@ -81,12 +82,29 @@ class KnowledgeNet(DynamicClass):
         self.html_wiki = wiki.Wikipedia(self.language) #,extract_format=wiki.ExtractFormat.HTML)
         self.categry_label = {'de':'Kategorie','en':'Category'}[self.language]
         
+
+    def setSkipRule(self,rules):
+        if type(rules) == str:
+            rules = [rules]
+            
+        add_counter = 0
+        for rule in rules:
+            if not rule in self.skip_rules:
+                self.skip_rules.append(rule)
+                add_counter += 1
+        self.log('Appended %d new skip_rules.'%add_counter,level=0)
+        
     def startScan(self,start_at,depth=3,skip=[],skip_rules=[],verbose=1):
+        self.newTask(verbose=verbose)
+        
+        if not self.html_wiki.page(start_at).exists():
+            self.log('Category %s does not exist!'%start_at,level=0)
+            return False
+        
         if start_at in self.category_tree.keys():
             self.log('Category %s was already part of the tree.'%start_at,level=0)
             return False
         
-        self.newTask(verbose=verbose)
         self.log('Start crawling categories starting at %s.'%start_at,level=0)
         self.root.append(start_at)
         self.category_tree[start_at] = []
@@ -100,15 +118,24 @@ class KnowledgeNet(DynamicClass):
         self.printStatus()
         return True
 
-    def scanLevel(self,category,lvl,skip=[],skip_rules=[],verbose=1):
-        cat_page = self.html_wiki.page(category)
+    def scanLevel(self,category,lvl,skip=[],skip_rules=[],verbose=1):       
+        # only for functional savety validation
+        if category in self.closed_categories:
+            raise Exception("Category %s crawled twice!"%category)
         
         new_categories = 0
         new_articles = 0
         skipped = 0
+        
+        cat_page = self.html_wiki.page(category)
+        if not cat_page.exists():
+            self.log('Page %s was not found!'%category,level=0)
+            self.closed_categories.append(category)
+            return new_articles,new_categories,skipped
+        
         for cat in cat_page.categorymembers.keys():
             skipped_by_rule = False
-            for rule in skip_rules:
+            for rule in skip_rules + self.skip_rules:
                 if re.match(rule,cat):
                     skipped_by_rule = True
             
@@ -133,11 +160,13 @@ class KnowledgeNet(DynamicClass):
                 self.category_tree[cat] = []
             self.category_tree[cat].append(category)
                     
+        self.closed_categories.append(category)
         return new_articles,new_categories,skipped
     
     def crawlDeeper(self,lvl=None,skip=[],skip_rules=[],verbose=1):
         if not type(lvl) == int:
             lvl = min(self.open_categories.values())
+            
         next_categories = [cat for cat,lvl in self.open_categories.items() if lvl == lvl]
         new_categories = 0
         new_articles = 0
@@ -162,20 +191,25 @@ class KnowledgeNet(DynamicClass):
         self.printStatus('Done')
         return new_categories
 
-    def collect(self,links=True,text=False,ignore=[],ignore_rules=[],verbose=1):
+    def collect(self,links=True,text=False,ignore=[],ignore_rules=[],limit=None,verbose=1):
+        if type(limit) == type(None):
+            limit = len(self.articles)
+        
         lnks = 0
         start = time()
-        total = len(self.articles)
+        
         self.newTask(verbose=verbose)
-        for i,p in enumerate(self.articles.keys()):
+        target_pages = list(self.articles.keys())[:limit]
+        total = len(target_pages)
+        for i,p in enumerate(target_pages):
                 
-            cat_heridity = self.retriveCategories(p)
+            cat_heridity = self.retrieveCategories(p)
             page = self.html_wiki.page(p)
             have_cat = set(cat_heridity).union(page.categories.keys())
                 
             ignore_by_rule = False
             for cat in have_cat:
-                for rule in ignore_rules:
+                for rule in ignore_rules + self.skip_rules:
                     if re.match(rule,cat):
                         ignore_by_rule = True
                             
@@ -188,7 +222,7 @@ class KnowledgeNet(DynamicClass):
                 if links:
                     lnks += len(self.links[p])
                             
-            if i%10 == 0 or i+1 == len(self.articles):         
+            if i%10 == 0 or i+1 == total:         
                 bar = '='*int(np.ceil((i+1)/total*30))
                     
                 now = time()
@@ -278,14 +312,13 @@ class KnowledgeNet(DynamicClass):
                 if not lvl > max_lvl:
                     self.printSubcats(ct,lvl+1,max_lvl)
     
-    def retriveCategories(self,article):
+    def retrieveCategories(self,article):
         ancestor_generation = set(self.category_tree[article])
         ancestors = [ancestor_generation]
         while len([a for a in ancestor_generation if not a == []]) > 0:
             ancestor_generation = set([])
             for parent in ancestors[-1]: 
                 ancestor_generation.update(self.category_tree[parent])
-                seq = self.category_tree[parent]
             ancestors.append(ancestor_generation)
             
         categories = []
@@ -296,7 +329,7 @@ class KnowledgeNet(DynamicClass):
                     
         return categories
     
-    def retriveNetwork(self):
+    def retrieveNetwork(self):
         network = {}
         outside = {}
         for page,link_list in self.links.items():
@@ -344,4 +377,5 @@ class KnowledgeNet(DynamicClass):
         for lg in self.logging:
             if lg['level'] < level:
                 print(lg['message'])
+                
                 

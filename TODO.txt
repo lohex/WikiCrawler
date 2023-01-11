@@ -2,7 +2,7 @@ Todo:
 
 * set ignore rules once (method setIgnoreRule)
 
-* check if repated crawling of subcategories is avoided
+* check if repeated crawling of subcategories is avoided
 
 * check if comon segements (sources...) are ignored by the text collection
 
