@@ -68,6 +68,7 @@ class KnowledgeNet(DynamicClass):
         self.open_categories = {}
         self.category_tree = {}
         self.closed_categories = []
+        self.article_categories = {}
         
         self.links = {}
         self.pages = {}
@@ -79,10 +80,9 @@ class KnowledgeNet(DynamicClass):
             self.startScan(start_at,depth,skip=skip,skip_rules=skip_rules,verbose=verbose)
         
     def initWiki(self):
-        self.html_wiki = wiki.Wikipedia(self.language) #,extract_format=wiki.ExtractFormat.HTML)
+        self.html_wiki = wiki.Wikipedia(self.language, extract_format=wiki.ExtractFormat.HTML)
         self.categry_label = {'de':'Kategorie','en':'Category'}[self.language]
         
-
     def setSkipRule(self,rules):
         if type(rules) == str:
             rules = [rules]
@@ -101,13 +101,11 @@ class KnowledgeNet(DynamicClass):
             self.log('Category %s does not exist!'%start_at,level=0)
             return False
         
-        if start_at in self.category_tree.keys():
-            self.log('Category %s was already part of the tree.'%start_at,level=0)
-            return False
-        
         self.log('Start crawling categories starting at %s.'%start_at,level=0)
-        self.root.append(start_at)
-        self.category_tree[start_at] = []
+        if not start_at in self.category_tree.keys():
+            self.root.append(start_at)
+            self.category_tree[start_at] = []
+            
         dn_art,dn_cat,dn_skip = self.scanLevel(start_at,0,skip=skip,skip_rules=skip_rules,verbose=1)
         self.log('Scanned on level 1: found %d pages and %d subcategories, %d skipped.'%(dn_art,dn_cat,dn_skip),level=0)
         for d in range(1,depth):
@@ -167,7 +165,7 @@ class KnowledgeNet(DynamicClass):
         if not type(lvl) == int:
             lvl = min(self.open_categories.values())
             
-        next_categories = [cat for cat,lvl in self.open_categories.items() if lvl == lvl]
+        next_categories = [cat for cat,l in self.open_categories.items() if l == lvl]
         new_categories = 0
         new_articles = 0
         skipped = 0
@@ -179,11 +177,9 @@ class KnowledgeNet(DynamicClass):
             new_articles += dn_art
             skipped += dn_skip
             base_status = 'Crawled %d/%d categories. Found %d pages and %d subcategories, %d skipped.'
-            status_message = base_status%(nc,len(next_categories),new_articles,new_categories,skipped)
-            self.printStatus(status_message,verbose=verbose)
-        
-        for cat in next_categories:
+            status_message = base_status%(nc+1,len(next_categories),new_articles,new_categories,skipped)
             del self.open_categories[cat]
+            self.printStatus(status_message,verbose=verbose)
         
         base_message = 'Scanned on level %d: found %d pages and %d subcategories, %d skipped.'
         message = base_message%(lvl+1,new_articles,new_categories,skipped)
@@ -254,17 +250,19 @@ class KnowledgeNet(DynamicClass):
                     info += f' {len(self.skipped)} skipped'
                 self.printStatus(info,verbose=verbose)
     
-    def collectArticle(self,p,links=False,text=False,page=None):
+    def collectArticle(self,page,links=False,text=False,page=None):
         for tried in range(3):
             try:
+
                 if type(page) == type(None):
-                    page = self.html_wiki.page(p)
+                    page_obj = self.html_wiki.page(page)
                     
+                self.article_categories[page] = page_obj.categories.keys()
                 if links:
-                    self.links[p] = list(page.links.keys())
+                    self.links[page] = list(page_obj.links.keys())
                 if text:
                     text = self.extractSectionwise(page)
-                    self.pages[p] = text
+                    self.pages[page] = text
                 
                 return True
 
@@ -328,7 +326,7 @@ class KnowledgeNet(DynamicClass):
                     categories.append(c)
                     
         return categories
-    
+    ´
     def retrieveNetwork(self):
         network = {}
         outside = {}
@@ -344,7 +342,7 @@ class KnowledgeNet(DynamicClass):
                     outside[lnk] += 1
 
         self.network = {p:c for p,c in sorted(network.items(),key=lambda x:-x[1])}
-        self.outside = {p:c for p,c in sorted(outside.items(),key=lambda x:-x[1])}
+        self.outside = {p:c for p,c in sorted(outside.items(),key=lambda x:-x[1]) if not '(identifier)' in p and not 'Wikipedia:' in p}
         return self.network
     
     def printStatus(self,state=None,verbose=None):
@@ -377,5 +375,4 @@ class KnowledgeNet(DynamicClass):
         for lg in self.logging:
             if lg['level'] < level:
                 print(lg['message'])
-                
                 
