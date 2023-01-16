@@ -14,6 +14,9 @@ import os
 
 class DynamicClass:
             
+    def __init__(self):
+        self.save_path = ''
+    
     @staticmethod
     def load(file_name):
         dummy = KnowledgeNet(None)#,language=None)
@@ -40,6 +43,7 @@ class DynamicClass:
             for var in save_variables:
                 pkl.dump(getattr(self,var),fp)
                 
+        self.save_path = file_name
         print('Saved %d member variables to %s'%(len(save_variables),file_name))
     
     def update(self):
@@ -55,6 +59,7 @@ class DynamicClass:
 class KnowledgeNet(DynamicClass):
     
     def __init__(self,language='en',start_at=None,depth=3,skip=[],skip_rules=[],verbose=1):
+        super().__init__()
         self.logging = []
         self.state = ''
         self.taskLogStart = 0
@@ -69,6 +74,8 @@ class KnowledgeNet(DynamicClass):
         self.category_tree = {}
         self.closed_categories = []
         self.article_categories = {}
+        self.skipped_collect = []
+        self.collected = 0
         
         self.links = {}
         self.pages = {}
@@ -97,7 +104,8 @@ class KnowledgeNet(DynamicClass):
     def startScan(self,start_at,depth=3,skip=[],skip_rules=[],verbose=1):
         self.newTask(verbose=verbose)
         
-        if not self.html_wiki.page(start_at).exists():
+        page = self.html_wiki.page(start_at)
+        if not page.exists():
             self.log('Category %s does not exist!'%start_at,level=0)
             return False
         
@@ -169,7 +177,7 @@ class KnowledgeNet(DynamicClass):
         new_categories = 0
         new_articles = 0
         skipped = 0
-        arts_init = len(self.articles)
+        
         for nc,cat in enumerate(next_categories):
             dn_art,dn_cat,dn_skip = self.scanLevel(cat,lvl,skip=skip,skip_rules=skip_rules)  
                 
@@ -187,15 +195,30 @@ class KnowledgeNet(DynamicClass):
         self.printStatus('Done')
         return new_categories
 
-    def collect(self,links=True,text=False,ignore=[],ignore_rules=[],limit=None,verbose=1):
+    def collect(self,links=True,text=False,ignore=[],ignore_rules=[],
+                save_path=None,save_interval=None,
+                limit=None,start_at=None,verbose=1):
         if type(limit) == type(None):
             limit = len(self.articles)
-        
+        if type(start_at) == type(None):
+            start_at = self.collected
+            
+        if os.path.exists(save_path) and not os.path.isdir(save_path):
+            raise Exception(f'Folder {save_path} is not a directory!')
+        if not os.path.exists(save_path):
+            os.mkdir(save_path)
+            
+            
+        auto_save = self.save_path != '' and type(save_interval) == int
+        # with zipfile.ZipFile(save_path + '.zip',"w",zipfile.ZIP_DEFLATED,allowZip64=True) as zf: 
+        #    zf.write(name, name)
+
+            
         lnks = 0
         start = time()
         
         self.newTask(verbose=verbose)
-        target_pages = list(self.articles.keys())[:limit]
+        target_pages = list(self.articles.keys())[start_at:limit]
         total = len(target_pages)
         for i,p in enumerate(target_pages):
                 
@@ -212,12 +235,15 @@ class KnowledgeNet(DynamicClass):
             bad_cat = have_cat.intersection(ignore)
             if ignore_by_rule or len(bad_cat) > 0:
                 self.log('skip article %s by categories'%(p),level=1)
-                self.skipped.append(p)
+                self.skipped_collect.append(p)
             else:
-                self.collectArticle(p,links=links,text=text)
+                self.collectArticle(p,links=links,text=text,page_obj=page,save_path=save_path)
                 if links:
                     lnks += len(self.links[p])
-                            
+            
+            if auto_save and (i%save_interval == 0 or i+1 == total):
+                self.save(self.save_path,overwrite=True)
+            
             if i%10 == 0 or i+1 == total:         
                 bar = '='*int(np.ceil((i+1)/total*30))
                     
@@ -246,28 +272,33 @@ class KnowledgeNet(DynamicClass):
                     size /= 1024**oom
                     unit = ['B','KB','MB','GB'][oom]
                     info += f' {size:.2f} {unit} of text'
-                if len(self.skipped) > 0:
+                if len(self.skipped_collect) > 0:
                     info += f' {len(self.skipped)} skipped'
                 self.printStatus(info,verbose=verbose)
     
-    def collectArticle(self,page,links=False,text=False,page=None):
+    def collectArticle(self,page,links=False,text=False,page_obj=None,save_path=None):
         for tried in range(3):
             try:
 
-                if type(page) == type(None):
+                if type(page_obj) == type(None):
                     page_obj = self.html_wiki.page(page)
                     
                 self.article_categories[page] = page_obj.categories.keys()
                 if links:
                     self.links[page] = list(page_obj.links.keys())
                 if text:
-                    text = self.extractSectionwise(page)
+                    text = self.extractText(page_obj) #self.extractSectionwise(page)
+                    if type(save_path) != type(None):
+                        self.saveText(text,save_path)
                     self.pages[page] = text
-                
+                self.collected += 1
+                 
                 return True
 
-            except:
-                print('Network problem loading "%s"'%p,end='')
+            except Exception as expt:
+                print(type(expt)) 
+                print('Network problem loading "%s"'%page,end='')
+
                 for r in range(30):
                     sleep(2)
                     print('.',end='')
@@ -276,10 +307,28 @@ class KnowledgeNet(DynamicClass):
                     print(' try again.')
                 else:
                     print("don't try again.")
-                    self.log('skip "%s" for network problems.'%p,level=1)
+                    self.log('skip "%s" for network problems.'%page,level=1)
                     return False
 
     
+    def extractText(self,page,save=None):
+        lines = []
+        res = re.findall('<p[^>]*>.*?</p>',page.text,flags= re.IGNORECASE | re.DOTALL)
+        for p in res:
+            p = re.sub('<.*?>','',p)
+            p = re.sub('\s+',' ',p,)
+            lines.append(p.strip())
+        return lines
+    
+    def saveText(self,lines,save_path,zipped=False):
+        file_path = os.path.join(save_path, 'article_%d.txt'%(self.collected+1))
+        with open(file_path,'w') as fp:
+            for l,line in enumerate(lines):
+                out = line+'\n' if l < len(lines)-1 else line
+                fp.write(out)
+        
+       
+
     def extractSectionwise(self,section):
         sects = {section.title : section.text}
         for subs in section.sections:
@@ -326,7 +375,7 @@ class KnowledgeNet(DynamicClass):
                     categories.append(c)
                     
         return categories
-    ´
+    
     def retrieveNetwork(self):
         network = {}
         outside = {}

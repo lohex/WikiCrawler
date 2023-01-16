@@ -1,13 +1,19 @@
-Todo:
+Bugfixes + article categories + Additional demos in notebook
 
+Bugfixes:
+* tried to crawl all articles (independent from level) in each level.
 
+New features:
 * check if repeated crawling of subcategories is avoided
 * More sections and functions in demo-notebook
 * collect: save direkt cateogiries of page
 
 
+
 * check if comon segements (sources...) are ignored by the text collection
 
+
+* save to zip file (every n collected articles)
 * save to pkl or txt every n collected articles
 
     
