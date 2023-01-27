@@ -11,6 +11,8 @@ from sys import getsizeof
 from time import time,sleep
 import dill as pkl
 import os
+#from zipfile import ZipFile
+import zipfile
 
 class DynamicClass:
             
@@ -104,7 +106,11 @@ class KnowledgeNet(DynamicClass):
     def startScan(self,start_at,depth=3,skip=[],skip_rules=[],verbose=1):
         self.newTask(verbose=verbose)
         
-        page = self.html_wiki.page(start_at)
+        try:
+            page = self.html_wiki.page(start_at)
+        except:
+            raise Exception('Connection to Wikipedia failed!')
+            
         if not page.exists():
             self.log('Category %s does not exist!'%start_at,level=0)
             return False
@@ -122,6 +128,7 @@ class KnowledgeNet(DynamicClass):
                 break
                 
         self.printStatus()
+        self.indexInfo()
         return True
 
     def scanLevel(self,category,lvl,skip=[],skip_rules=[],verbose=1):       
@@ -133,7 +140,11 @@ class KnowledgeNet(DynamicClass):
         new_articles = 0
         skipped = 0
         
-        cat_page = self.html_wiki.page(category)
+        try:
+            cat_page = self.html_wiki.page(category)
+        except:
+            raise Exception('Connection to Wikipedia failed!')
+            
         if not cat_page.exists():
             self.log('Page %s was not found!'%category,level=0)
             self.closed_categories.append(category)
@@ -192,33 +203,35 @@ class KnowledgeNet(DynamicClass):
         base_message = 'Scanned on level %d: found %d pages and %d subcategories, %d skipped.'
         message = base_message%(lvl+1,new_articles,new_categories,skipped)
         self.log(message,level=0)
-        self.printStatus('Done')
+        #self.printStatus('Done')
         return new_categories
 
+    def indexInfo(self):
+        print('Collected %d articles from %d categories.'%(len(self.articles),len(self.closed_categories)))
+
     def collect(self,links=True,text=False,ignore=[],ignore_rules=[],
-                save_path=None,save_interval=None,
-                limit=None,start_at=None,verbose=1):
+                save_path=None,zipped=False,save_interval=None,
+                limit=None,verbose=1):
+        
+        start_at = self.collected
         if type(limit) == type(None):
             limit = len(self.articles)
-        if type(start_at) == type(None):
-            start_at = self.collected
-            
+        
         if os.path.exists(save_path) and not os.path.isdir(save_path):
             raise Exception(f'Folder {save_path} is not a directory!')
-        if not os.path.exists(save_path):
+        if not type(save_path) == type(None) and not zipped and not os.path.exists(save_path):
             os.mkdir(save_path)
-            
-            
         auto_save = self.save_path != '' and type(save_interval) == int
-        # with zipfile.ZipFile(save_path + '.zip',"w",zipfile.ZIP_DEFLATED,allowZip64=True) as zf: 
-        #    zf.write(name, name)
 
-            
+        txts = 0
         lnks = 0
+        skpd = 0
         start = time()
         
+        print('starting at %d, ending at %d'%(start_at,start_at+limit))
+        
         self.newTask(verbose=verbose)
-        target_pages = list(self.articles.keys())[start_at:limit]
+        target_pages = list(self.articles.keys())[start_at:start_at+limit]
         total = len(target_pages)
         for i,p in enumerate(target_pages):
                 
@@ -236,50 +249,59 @@ class KnowledgeNet(DynamicClass):
             if ignore_by_rule or len(bad_cat) > 0:
                 self.log('skip article %s by categories'%(p),level=1)
                 self.skipped_collect.append(p)
+                skpd += 1
             else:
-                self.collectArticle(p,links=links,text=text,page_obj=page,save_path=save_path)
+                if not self.collectArticle(p,links=links,text=text,page_obj=page,save_path=save_path,zipped=zipped):
+                    continue
+                
                 if links:
                     lnks += len(self.links[p])
+                if text:
+                    txts += self.pages[p] if type(self.pages[p]) == int else len(self.pages[p])
+            
+            self.collected += 1
             
             if auto_save and (i%save_interval == 0 or i+1 == total):
                 self.save(self.save_path,overwrite=True)
+                self.log('saved pkl',level=0)
             
-            if i%10 == 0 or i+1 == total:         
-                bar = '='*int(np.ceil((i+1)/total*30))
-                    
-                now = time()
-                diff = np.round(now-start)
-                pro = (i+1)/total
-                wait = np.round((1-pro)/pro*diff)
-                run_time = f'{diff} s'
-                if diff > 60:
-                    mins = int(diff//60)
-                    rest = int(diff%60)
-                    run_time = f'{mins} min {rest:02d} s'
-                wait_time = f'{wait} s'
-                if wait > 60:
-                    mins = int(wait//60)
-                    rest = int(wait%60)
-                    wait_time = f'{mins} min {rest:02d} s'
-                    
-                info = f'Collecting: [{bar:<30}] {int(pro*100):3d} % ({i+1}/{total} pages)'
-                info += f'\n running: {run_time} ; remaining: {wait_time} s \n'
-                if links:
-                    info += f' {lnks} links'
-                if text:
-                    size = getsizeof(self.pages)
-                    oom = int(np.log(size)//np.log(1024))
-                    size /= 1024**oom
-                    unit = ['B','KB','MB','GB'][oom]
-                    info += f' {size:.2f} {unit} of text'
-                if len(self.skipped_collect) > 0:
-                    info += f' {len(self.skipped)} skipped'
-                self.printStatus(info,verbose=verbose)
+            if i%10 == 0 or i+1 == total: 
+                self.progresBar(i,total,start,lnks,txts,skpd,verbose)
+                
+    def progresBar(self,i,total,start,lnks,txts,skpd,verbose):
+        bar = '='*int(np.ceil((i+1)/total*30))
+        now = time()
+        diff = np.round(now-start)
+        pro = (i+1)/total
+        wait = np.round((1-pro)/pro*diff)
+        run_time = f'{diff} s'
+        if diff > 60:
+            mins = int(diff//60)
+            rest = int(diff%60)
+            run_time = f'{mins} min {rest:02d} s'
+        wait_time = f'{wait} s'
+        if wait > 60:
+            mins = int(wait//60)
+            rest = int(wait%60)
+            wait_time = f'{mins} min {rest:02d} s'
+            
+        info = f'Collecting: [{bar:<30}] {int(pro*100):3d} % ({i+1}/{total} pages)'
+        info += f'\n running: {run_time} ; remaining: {wait_time} s \n'
+        if lnks > 0:
+            info += f' {lnks} links'
+        if txts > 0:
+            info += f' {txts} lines of text'
+        if len(self.skipped_collect) > 0:
+            info += f' {skpd} skipped'
+        
+        self.printStatus(info,verbose=verbose)
     
-    def collectArticle(self,page,links=False,text=False,page_obj=None,save_path=None):
+    def collectArticle(self,page,links=False,text=False,page_obj=None,save_path=None,zipped=False):
+        if page in self.pages.keys():
+            raise Exception('Refetch sape page: %s'%page)
+            
         for tried in range(3):
             try:
-
                 if type(page_obj) == type(None):
                     page_obj = self.html_wiki.page(page)
                     
@@ -289,18 +311,20 @@ class KnowledgeNet(DynamicClass):
                 if text:
                     text = self.extractText(page_obj) #self.extractSectionwise(page)
                     if type(save_path) != type(None):
-                        self.saveText(text,save_path)
-                    self.pages[page] = text
-                self.collected += 1
-                 
-                return True
+                        self.pages[page] = len(text)
+                        self.saveText(text,save_path,page,zipped)
+                        
+                    else:
+                        self.pages[page] = text
+
+                return len(text)
 
             except Exception as expt:
                 print(type(expt)) 
                 print('Network problem loading "%s"'%page,end='')
 
                 for r in range(30):
-                    sleep(2)
+                    sleep(1)
                     print('.',end='')
                             
                 if tried < 2:
@@ -320,15 +344,20 @@ class KnowledgeNet(DynamicClass):
             lines.append(p.strip())
         return lines
     
-    def saveText(self,lines,save_path,zipped=False):
-        file_path = os.path.join(save_path, 'article_%d.txt'%(self.collected+1))
-        with open(file_path,'w') as fp:
-            for l,line in enumerate(lines):
-                out = line+'\n' if l < len(lines)-1 else line
-                fp.write(out)
+    def saveText(self,lines,save_path,page,zipped=False):
+        title = re.sub('[^a-z0-9_-]','?',page.replace(' ','_'),flags=re.IGNORECASE)
+        file_path = os.path.join(save_path, title)
         
-       
-
+        if zipped:
+            with zipfile.ZipFile(save_path+'.zip','a',compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(title+'.txt','\n'.join(lines))  
+        else:
+            with open(file_path+'.txt','w') as fp:
+                for l,line in enumerate(lines):
+                    out = line+'\n' if l < len(lines)-1 else line
+                    fp.write(out)
+        
+    # depreciated, remove soon
     def extractSectionwise(self,section):
         sects = {section.title : section.text}
         for subs in section.sections:

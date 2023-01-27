@@ -13,8 +13,12 @@ New features:
 * check if comon segements (sources...) are ignored by the text collection
 
 
+Bugfixes + New features
+
+Bugfixes:
+
+
+New features:
 * save to zip file (every n collected articles)
 * save to pkl or txt every n collected articles
-
-    
-    
+* catch ReadTimeout exceptions during crawling categiries
