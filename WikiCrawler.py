@@ -36,6 +36,7 @@ class DynamicClass:
         if exists and not overwrite:
             raise Exception(f'File {file_name} already exists!')
         
+        self.save_path = file_name
         no_save = ["<class 'function'>","<class 'method'>"]
         save_variables = [child for child in dir(self)
                   if not re.match('^__.*__$',child) and not str(type(getattr(self,child))) in no_save]
@@ -45,7 +46,6 @@ class DynamicClass:
             for var in save_variables:
                 pkl.dump(getattr(self,var),fp)
                 
-        self.save_path = file_name
         print('Saved %d member variables to %s'%(len(save_variables),file_name))
     
     def update(self):
@@ -217,10 +217,13 @@ class KnowledgeNet(DynamicClass):
         if type(limit) == type(None):
             limit = len(self.articles)
         
-        if os.path.exists(save_path) and not os.path.isdir(save_path):
-            raise Exception(f'Folder {save_path} is not a directory!')
-        if not type(save_path) == type(None) and not zipped and not os.path.exists(save_path):
-            os.mkdir(save_path)
+        if not type(save_path) == type(None):
+            if os.path.exists(save_path) and not os.path.isdir(save_path):
+                raise Exception(f'Folder {save_path} is not a directory!')
+            if not type(save_path) == type(None) and not zipped and not os.path.exists(save_path):
+                os.mkdir(save_path)
+            if not type(save_path) == type(None):
+                self.archive = save_path if not zipped else save_path+'.zip'
         auto_save = self.save_path != '' and type(save_interval) == int
 
         txts = 0
@@ -228,17 +231,21 @@ class KnowledgeNet(DynamicClass):
         skpd = 0
         start = time()
         
-        print('starting at %d, ending at %d'%(start_at,start_at+limit))
-        
         self.newTask(verbose=verbose)
         target_pages = list(self.articles.keys())[start_at:start_at+limit]
         total = len(target_pages)
         for i,p in enumerate(target_pages):
                 
             cat_heridity = self.retrieveCategories(p)
-            page = self.html_wiki.page(p)
-            have_cat = set(cat_heridity).union(page.categories.keys())
+            try:
+                page = self.html_wiki.page(p)
+            except:
+                print('Reconnecting to Wikipkedia...')
+                sleep(3)
+                self.initWiki()
+                page = self.html_wiki.page(p)
                 
+            have_cat = set(cat_heridity).union(page.categories.keys())
             ignore_by_rule = False
             for cat in have_cat:
                 for rule in ignore_rules + self.skip_rules:
@@ -251,19 +258,16 @@ class KnowledgeNet(DynamicClass):
                 self.skipped_collect.append(p)
                 skpd += 1
             else:
-                if not self.collectArticle(p,links=links,text=text,page_obj=page,save_path=save_path,zipped=zipped):
-                    continue
-                
-                if links:
+                collected = self.collectArticle(p,links=links,text=text,page_obj=page,categories=cat_heridity)
+                if collected and links:
                     lnks += len(self.links[p])
-                if text:
+                if collected and text:
                     txts += self.pages[p] if type(self.pages[p]) == int else len(self.pages[p])
             
             self.collected += 1
             
             if auto_save and (i%save_interval == 0 or i+1 == total):
                 self.save(self.save_path,overwrite=True)
-                self.log('saved pkl',level=0)
             
             if i%10 == 0 or i+1 == total: 
                 self.progresBar(i,total,start,lnks,txts,skpd,verbose)
@@ -296,9 +300,9 @@ class KnowledgeNet(DynamicClass):
         
         self.printStatus(info,verbose=verbose)
     
-    def collectArticle(self,page,links=False,text=False,page_obj=None,save_path=None,zipped=False):
+    def collectArticle(self,page,links=False,text=False,page_obj=None,categories=[]):
         if page in self.pages.keys():
-            raise Exception('Refetch sape page: %s'%page)
+            return False
             
         for tried in range(3):
             try:
@@ -310,17 +314,18 @@ class KnowledgeNet(DynamicClass):
                     self.links[page] = list(page_obj.links.keys())
                 if text:
                     text = self.extractText(page_obj) #self.extractSectionwise(page)
-                    if type(save_path) != type(None):
+                    if hasattr(self,'save_path'):
                         self.pages[page] = len(text)
-                        self.saveText(text,save_path,page,zipped)
-                        
+                        self.saveText(page,text,categories)
                     else:
                         self.pages[page] = text
+                        
 
                 return len(text)
 
             except Exception as expt:
-                print(type(expt)) 
+                print(type(expt))
+                print(expt)
                 print('Network problem loading "%s"'%page,end='')
 
                 for r in range(30):
@@ -335,37 +340,38 @@ class KnowledgeNet(DynamicClass):
                     return False
 
     
-    def extractText(self,page,save=None):
+    def extractText(self,page):
         lines = []
         res = re.findall('<p[^>]*>.*?</p>',page.text,flags= re.IGNORECASE | re.DOTALL)
         for p in res:
             p = re.sub('<.*?>','',p)
             p = re.sub('\s+',' ',p,)
             lines.append(p.strip())
-        return lines
+        return [lns for lns in lines if len(lns) > 3]
     
-    def saveText(self,lines,save_path,page,zipped=False):
-        title = re.sub('[^a-z0-9_-]','?',page.replace(' ','_'),flags=re.IGNORECASE)
-        file_path = os.path.join(save_path, title)
+    def saveText(self,page,lines,categories):
+        #title = re.sub('[^a-z0-9_-]','?',page.replace(' ','_'),flags=re.IGNORECASE)
+        short_categories = [cat[len(self.categry_label)+1:] for cat in categories]
+        print_lines = [', '.join(short_categories)]+[', '.join(self.article_categories[page])]+lines
         
-        if zipped:
-            with zipfile.ZipFile(save_path+'.zip','a',compression=zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr(title+'.txt','\n'.join(lines))  
+        if re.match('.*?\.zip$',self.save_path):
+            with zipfile.ZipFile(self.save_path,'a',compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(page+'.txt','\n'.join(print_lines)) 
+                
         else:
+            file_path = os.path.join(self.save_path, page)
             with open(file_path+'.txt','w') as fp:
-                for l,line in enumerate(lines):
+                for l,line in enumerate(print_lines):
                     out = line+'\n' if l < len(lines)-1 else line
                     fp.write(out)
         
-    # depreciated, remove soon
-    def extractSectionwise(self,section):
-        sects = {section.title : section.text}
-        for subs in section.sections:
-            if not subs.title in ['See also', 'References', 'Notes', 'Further reading', 'External links']:
-                nuw_subs_sects = self.extractSectionwise(subs)
-                sects.update(nuw_subs_sects)
-        return sects
-    
+    def resetCollection(self):
+        self.collected = 0
+        self.links = {}
+        self.pages = {}
+        self.article_categories = {}
+        os.remove(self.archive)
+
     def printCategoryTree(self,max_lvl=None):
         if type(max_lvl) == type(None):
             max_lvl = max(self.articles.values())
