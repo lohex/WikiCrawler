@@ -344,6 +344,7 @@ class KnowledgeNet(DynamicClass):
                         self.saveText(page,text,categories)
                     else:
                         self.pages[page] = text
+                        
 
                 return len(text)
                 
