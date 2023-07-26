@@ -7,6 +7,7 @@ from sys import getsizeof
 from time import time,sleep
 import dill as pkl
 import os
+import shutil
 #from zipfile import ZipFile
 import zipfile
 
@@ -76,8 +77,9 @@ class KnowledgeNet(DynamicClass):
         self.skip_rules = []
         self.skipped = []
         self.resetCollection()
-        
-        self.label_blacklist = ['Articles covered','Articles tagged','All articles','All Wikipedia articles','Articles with','.*Wikidata','Articles lacking','Articles needing','Articles containing','Articles requiring','Wikipedia articles in need of']
+
+        self.label_blacklist = ['Wikipedia articles incorporating','Webarchive template wayback links','Articles citing','Articles that','Wikipedia articles needing','All orphaned articles','Orphaned articles','Articles using','Pages with listed','Use dmy dates from','CS1']
+        self.label_blacklist += ['Articles covered','Articles tagged','All articles','All Wikipedia articles','Articles with','.*Wikidata','Articles lacking','Articles needing','Articles containing','Articles requiring','Wikipedia articles in need of']
 
 
         self.language = language
@@ -87,10 +89,19 @@ class KnowledgeNet(DynamicClass):
             self.startScan(start_at,depth,skip=skip,skip_rules=skip_rules,verbose=verbose)
         
     def initWiki(self):
+        """
+        Creates a connection to wikipedia which can be used to request articles and metainformation.
+        """
         self.html_wiki = wiki.Wikipedia(self.language, extract_format=wiki.ExtractFormat.HTML)
         self.categry_label = {'de':'Kategorie','en':'Category'}[self.language]
         
     def setSkipRule(self,rules):
+        """
+        Define rules (Regex) to exclude Categories or articles.
+
+        Args:
+            rules (str / Regex): Regular expression. When evaluated true on the title of page the page is ommitted.
+        """
         if type(rules) == str:
             rules = [rules]
             
@@ -137,38 +148,17 @@ class KnowledgeNet(DynamicClass):
             self.log(f"The category '{category}' was skipped since it had been crawled before.")
             return new_articles,new_categories,skipped
         
-        try:
-            cat_page = self.html_wiki.page(category)
-        except:
-            raise Exception('Connection to Wikipedia failed!')
-            
+        cat_page,cat_categories = self.getPageAndCategories(category)            
         if not cat_page.exists():
             self.log('Page %s was not found!'%category,level=0)
             self.closed_categories.append(category)
             return new_articles,new_categories,skipped
         
-        repeats = 0
-        while repeats < 3:
-            try:
-                category_members = cat_page.categorymembers.keys()
-                break
-            except:
-                repeats += 1
-                print(f'Attempt {repeats}: Cannot collect categorymembers for {category}.')
-                sleep(0.5)
-        if repeats == 3:
-            raise Exception('Connection to Wikipedia failed (3 times)!')
+        category_members = self.getSubCategories(cat_page,category)
         
         for cat in category_members:
-            skipped_by_rule = False
-            for rule in skip_rules + self.skip_rules:
-                if re.match(rule,cat):
-                    skipped_by_rule = True
-            
-            if skipped_by_rule or cat in skip:
-                self.skipped.append(cat)
+            if not self.checkValid(cat,set([cat]).union(cat_categories),skip,skip_rules):
                 skipped += 1
-                self.log('skip %s (from %s)'%(cat,category),level=1)
                 continue
             
             parts = cat.split(':')
@@ -189,6 +179,19 @@ class KnowledgeNet(DynamicClass):
         self.closed_categories.append(category)
         return new_articles,new_categories,skipped
     
+    def getSubCategories(self,cat_page,category):
+        repeats = 0
+        while repeats < 3:
+            try:
+                category_members = cat_page.categorymembers.keys()
+                return category_members
+            except:
+                repeats += 1
+                print(f'Attempt {repeats}: Cannot collect categorymembers for {category}.')
+                sleep(0.5)
+        if repeats == 3:
+            raise Exception('Connection to Wikipedia failed (3 times)!')
+
     def crawlDeeper(self,lvl=None,skip=[],skip_rules=[],verbose=1):
         if not type(lvl) == int:
             lvl = min(self.open_categories.values())
@@ -221,6 +224,9 @@ class KnowledgeNet(DynamicClass):
                 archive_path=None,zipped=False,save_interval=None,
                 limit=None,verbose=1):
         
+        """
+        Collect links and/or text from all articles in the list.
+        """
         start_at = self.collected
         if type(limit) == type(None):
             limit = len(self.articles)
@@ -244,23 +250,23 @@ class KnowledgeNet(DynamicClass):
         total = len(target_pages)
         for i,p in enumerate(target_pages):
             try:
-                inherited_categories = self.retrieveCategories(p)            
+                inherited_categories = self.retrieveCategories(p)          
                 page,page_categories = self.getPageAndCategories(p)              
                 total_cat = set(inherited_categories).union(page_categories)
                 valid = self.checkValid(p,total_cat,ignore,ignore_rules)
                 if valid:
-                    collected = self.collectArticle(p,links=links,text=text,page_obj=page,categories=inherited_categories)
-                    if collected and links:
+                    self.collectArticle(p,links=links,text=text,page_obj=page,categories=inherited_categories)
+                    if links:
                         lnks += len(self.links[p])
-                    if collected and text:
+                    if text:
                         txts += self.pages[p] if type(self.pages[p]) == int else len(self.pages[p])
-                    skpd += 1
                         
             except KeyboardInterrupt:
                 self._progresBar(i,total,start,lnks,txts,skpd,verbose)
                 print('stopped by user')
                 break
-            except:
+            except Exception as e:
+                self.log(f"Exception while collecting {p}: {e}")
                 skpd += 1
             
             self.collected += 1
@@ -269,7 +275,6 @@ class KnowledgeNet(DynamicClass):
             
             if (i+1)%10 == 0 or i+1 == total: 
                 self._progresBar(i,total,start,lnks,txts,skpd,verbose)
-                
                 
     def _progresBar(self,i,total,start,lnks,txts,skpd,verbose):
         bar = '='*int(np.ceil((i+1)/total*30))
@@ -294,7 +299,7 @@ class KnowledgeNet(DynamicClass):
             info += f' {lnks} links'
         if txts > 0:
             info += f' {txts} lines of text'
-        if len(self.skipped_collect) > 0:
+        if skpd > 0:
             info += f' {skpd} skipped'
         
         self.stalk_time_prediction.append([diff,wait])
@@ -312,17 +317,21 @@ class KnowledgeNet(DynamicClass):
             try:
                 page_obj = self.html_wiki.page(page)
                 self.article_categories[page] = list(page_obj.categories.keys())
+
+                if repeat > 0:
+                    print(f'{page}: Download successfull after {repeat} failed trials.')
                 return page_obj,self.article_categories[page]
             
             except Exception as e:
-                print('Reconnecting to Wikipkedia...')
-                sleep(3)
-                self.initWiki()
-                if repeat > 2:
-                    self.log('Skipped article %s because of connection problems.'%page,level=0)
-                    self.skipped_by_problem[page] = type(e) 
-       
-        self.exception = e
+                if repeat < 2:
+                    print(f'Problem while collecting {page}: {e}...',end="")
+                    sleep(3)
+                    self.initWiki()
+                    sleep(3)
+                    print('Reconnected to Wikipkedia')
+        
+        self.log(f'Skipped article {page} because of connection problems.',level=0)
+        self.skipped_by_problem[page] = type(e) 
         raise Exception('Connection to Wikipedia failed!')
         
     
@@ -354,7 +363,7 @@ class KnowledgeNet(DynamicClass):
             self.skipped_by_category[p] = bad_cat
             
         if len(ignore_by_rule) > 0 or len(bad_cat) > 0:
-            self.log('skip article %s because of categories'%(p),level=1)
+            self.log('Skipped article %s because of categories'%(p),level=1)
             return False
         
         return True
@@ -363,8 +372,8 @@ class KnowledgeNet(DynamicClass):
         if page in self.pages.keys():
             return False
             
-        for tried in range(3):
-            if True:#try:
+        for repeat in range(3):
+            try:
                 if type(page_obj) == type(None):
                     page_obj = self.html_wiki.page(page)
                     
@@ -378,22 +387,19 @@ class KnowledgeNet(DynamicClass):
                     else:
                         self.pages[page] = text
                         
-
                 return len(text)
                 
-            else:#except Exception as e: #(ConnectionError , PermissionError):
-                print('Network or file problem loading "%s"'%page,end='')
-                for r in range(30):
-                    sleep(1)
-                    print('.',end='')
-                            
-                if tried < 2:
-                    print(' try again.')
-                else:
-                    print("don't try again.")
-                    self.skipped_by_problem[page] = type(e) 
-                    self.log('Skipped article "%s" because of network or file problems.'%page,level=1)
-                    return False
+            except Exception as e:
+                if repeat < 2:
+                    print(f'Problem while collecting {page}: {e}...',end="")
+                    sleep(3)
+                    self.initWiki()
+                    sleep(3)
+                    print('Reconnected to Wikipkedia')
+
+        self.log(f'Skipped article "{page}" because of connection problems.',level=1)
+        self.skipped_by_problem[page] = type(e)
+        raise Exception('Connection to Wikipedia failed!')
 
     
     def extractText(self,page):
@@ -435,26 +441,34 @@ class KnowledgeNet(DynamicClass):
                     out = line+'\n' if l < len(print_lines)-1 else line
                     fp.write(out)
         
-    def resetCollection(self):
+    def resetCollection(self,ask_before_deleting=True):
+        """
+        Delete the files containing the text and categories. The article list and category-tree will be maintained.
+        """
         self.collected = 0
         self.links = {}
         self.pages = {}
         self.article_categories = {}
         
-        self.skipped_collect = {}
         self.skipped_by_rule = {}
         self.skipped_by_category = {}
         self.skipped_by_problem = {}
         
-        if hasattr(self, 'archive_path') and os.path.isfile(self.archive_path):
-            ask_delelte = input('delete existing archive %s? [y/n]'%self.archive_path).strip()
-            while not re.match('^[yn]$', ask_delelte):
-                print('Please type "y" to delte the file or "n" to keep the file.')
+        if hasattr(self, 'archive_path'):
+            if ask_before_deleting:
                 ask_delelte = input('delete existing archive %s? [y/n]'%self.archive_path).strip()
-                print('response:>%s<'%ask_delelte)
+                while not re.match('^[yn]$', ask_delelte):
+                    print('Please type "y" to delte the file or "n" to keep the file.')
+                    ask_delelte = input('delete existing archive %s? [y/n]'%self.archive_path).strip()
+                    print('response: %s'%ask_delelte)
+            else:
+                ask_delelte = "y"
                  
             if ask_delelte == "y":
-                os.remove(self.archive_path)
+                if os.path.isfile(self.archive_path):
+                    os.remove(self.archive_path)
+                elif os.path.isdir(self.archive_path):
+                    shutil.rmtree(self.archive_path)
 
     def printCategoryTree(self,max_lvl=None):
         """
@@ -470,9 +484,9 @@ class KnowledgeNet(DynamicClass):
             arts = len([c for c,p in self.category_tree.items() if root in p and c in self.articles.keys()])
             print(f'{root} ({cats} C ; {arts} A)')
             if max_lvl > 0:
-                self.printSubcats(root,0,max_lvl-2)
+                self._printSubcats(root,0,max_lvl-2)
         
-    def printSubcats(self,cat,lvl,max_lvl):
+    def _printSubcats(self,cat,lvl,max_lvl):
         subcats = [c for c,p in self.category_tree.items() if cat in p]
         for ct in subcats:
             if self.categry_label in ct:
@@ -482,30 +496,39 @@ class KnowledgeNet(DynamicClass):
                 arts = len([c for c,p in self.category_tree.items() if ct in p and c in self.articles.keys()])
                 print(f'{indent}{name} ({cats} C ; {arts} A)')
                 if not lvl > max_lvl:
-                    self.printSubcats(ct,lvl+1,max_lvl)
+                    self._printSubcats(ct,lvl+1,max_lvl)
     
     def retrieveCategories(self,article):
         """
+        Collect all categories an article belongs to, including inhereted categories.
+
+        Args:
+            artilce (str): name of article.
+
+        Returns:
+            list of categories (str)
         """
         ancestor_generation = set(self.category_tree[article])
-        ancestors = [ancestor_generation]
-        while len([a for a in ancestor_generation if not a == []]) > 0:
-            ancestor_generation = set([])
-            for parent in ancestors[-1]: 
-                ancestor_generation.update(self.category_tree[parent])
-            ancestors.append(ancestor_generation)
-            
-        categories = []
-        for generateion in reversed(ancestors):
-            for c in generateion:
-                if not c in categories:
-                    categories.append(c)
-                    
-        return categories
-    
+        ancestors = set([])
+        while len([a for a in ancestor_generation if not a == []]) > 0 and len(ancestors) < 100:
+            next_ancestor_generation = set([])
+            for parent in ancestor_generation:
+                next_ancestor_generation.update(self.category_tree[parent])
+            next_ancestor_generation.difference_update(ancestors)
+            ancestor_generation = next_ancestor_generation
+            ancestors.update(ancestor_generation)
+        return list(ancestors)
+  
+
     def retrieveNetwork(self):
         """
-        Collect network and outside
+        Counts how often other the remaining articles from the list point to the respective artilce. 
+        In a second list, also articles that are not on the list are considered.
+
+        Returns:
+            inside (map): article from list : count of links to this artilce
+
+            outside (map): artilce not from list : count of links to this artilce
         """
         network = {}
         outside = {}
