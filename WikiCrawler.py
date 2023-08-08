@@ -10,6 +10,7 @@ import os
 import shutil
 #from zipfile import ZipFile
 import zipfile
+import hashlib
 
 class DynamicClass:
             
@@ -17,16 +18,19 @@ class DynamicClass:
         self.save_path = ''
     
     @staticmethod
-    def load(file_name):
+    def load(file_name,verbose=False):
         dummy = KnowledgeNet(None)#,language=None)
         loaded_variables = 0
         with open(file_name,'br') as fp:
             saved_variables = pkl.load(fp)
             try:
+                if verbose:
+                    print('imported variables:')
                 for i,var in enumerate(saved_variables):
                     setattr(dummy,var,pkl.load(fp))
                     loaded_variables += 1
-                    #print(f'imported {var}')
+                    if verbose:
+                        print(f'  -{var} ({type(var)})')
             except:
                 print('cannot find the variables %s'%(', '.join(saved_variables[loaded_variables:])))
 
@@ -60,6 +64,32 @@ class DynamicClass:
             setattr(new,var,getattr(self,var))
         return new
 
+
+def repeated_trials(action="collecting"):
+    """
+    Make functions interacting with wikipedia more stable against network/server problems.
+    """
+    def inner(function):
+        def wrapped_function(*args,**kwargs):
+            for repeat in range(4):
+                try:
+                    result = function(*args,**kwargs)
+                    return result
+                except Exception as e:
+                    if repeat < 3:
+                        print(f'Problem while {action} "{args[1]}": {e}... ',end="")
+                        sleep(5)
+                        args[0].initWiki()
+                        sleep(5)
+                        print('Reconnected to Wikipkedia')
+                    else:
+                        args[0].log(f'Skipped article "{args[1]}" because of connection problems.',level=2)
+                        sleep(5)
+                        args[0].skipped_by_problem[args[1]] = type(e)
+            raise Exception('Connection to Wikipedia failed!')
+        return wrapped_function
+    return inner
+
 class KnowledgeNet(DynamicClass):
     
     def __init__(self,language='en',start_at=None,depth=3,skip=[],skip_rules=[],verbose=1):
@@ -78,7 +108,7 @@ class KnowledgeNet(DynamicClass):
         self.skipped = []
         self.resetCollection()
 
-        self.label_blacklist = ['Wikipedia articles incorporating','Webarchive template wayback links','Articles citing','Articles that','Wikipedia articles needing','All orphaned articles','Orphaned articles','Articles using','Pages with listed','Use dmy dates from','CS1']
+        self.label_blacklist = ['Wikipedia articles incorporating','pages needing','Webarchive template wayback links','Articles citing','Articles that','Wikipedia articles needing','All orphaned articles','Orphaned articles','Articles using','Pages with listed','Use dmy dates from','CS1']
         self.label_blacklist += ['Articles covered','Articles tagged','All articles','All Wikipedia articles','Articles with','.*Wikidata','Articles lacking','Articles needing','Articles containing','Articles requiring','Wikipedia articles in need of']
 
 
@@ -114,11 +144,7 @@ class KnowledgeNet(DynamicClass):
         
     def startScan(self,start_at,depth=3,skip=[],skip_rules=[],verbose=1):
         self.newTask(verbose=verbose)
-        
-        try:
-            page = self.html_wiki.page(start_at)
-        except:
-            raise Exception('Connection to Wikipedia failed!')
+        page,cat_categories = self.getPageAndCategories(start_at)
             
         if not page.exists():
             self.log('Category %s does not exist!'%start_at,level=0)
@@ -154,7 +180,7 @@ class KnowledgeNet(DynamicClass):
             self.closed_categories.append(category)
             return new_articles,new_categories,skipped
         
-        category_members = self.getSubCategories(cat_page,category)
+        category_members = self.getSubCategories(category,cat_page)
         
         for cat in category_members:
             if not self.checkValid(cat,set([cat]).union(cat_categories),skip,skip_rules):
@@ -179,20 +205,29 @@ class KnowledgeNet(DynamicClass):
         self.closed_categories.append(category)
         return new_articles,new_categories,skipped
     
-    def getSubCategories(self,cat_page,category):
-        repeats = 0
-        while repeats < 3:
-            try:
-                category_members = cat_page.categorymembers.keys()
-                return category_members
-            except:
-                repeats += 1
-                print(f'Attempt {repeats}: Cannot collect categorymembers for {category}.')
-                sleep(0.5)
-        if repeats == 3:
-            raise Exception('Connection to Wikipedia failed (3 times)!')
+    @repeated_trials(action="getting subcategories")
+    def getSubCategories(self,page,cat_page):
+        """"
+        Extract categories that belong to this category.
+
+        Args:
+            page (str): Name of category
+
+            cat_page (page object): Wikipediaapi object refferencing the category page.
+        """
+        return cat_page.categorymembers.keys()
 
     def crawlDeeper(self,lvl=None,skip=[],skip_rules=[],verbose=1):
+        """
+        For each category in the list visit the subcategories that are not yet scanned for articles.
+
+        Args:
+            lvl (int / None): maximal level to follow subcategories.
+
+            skip (list of str): Ignore all categories from this list.
+
+            skip_rules (list of regexp.): Ignore all categories matching any rule from this list.
+        """
         if not type(lvl) == int:
             lvl = min(self.open_categories.values())
             
@@ -218,6 +253,9 @@ class KnowledgeNet(DynamicClass):
         return new_categories
 
     def indexInfo(self):
+        """
+        Print information on how many artilces from how many categories were collected so far.
+        """
         print('Collected %d articles from %d categories.'%(len(self.articles),len(self.closed_categories)))
 
     def collect(self,links=True,text=False,ignore=[],ignore_rules=[],
@@ -305,6 +343,7 @@ class KnowledgeNet(DynamicClass):
         self.stalk_time_prediction.append([diff,wait])
         self.printStatus(info,verbose=verbose)
     
+    @repeated_trials(action="getting page")
     def getPageAndCategories(self,page):
         """
         Collect page-object and save explicit categories
@@ -313,27 +352,11 @@ class KnowledgeNet(DynamicClass):
         Return:
             tuple: page-object , category list
         """
-        for repeat in range(3):
-            try:
-                page_obj = self.html_wiki.page(page)
-                self.article_categories[page] = list(page_obj.categories.keys())
-
-                if repeat > 0:
-                    print(f'{page}: Download successfull after {repeat} failed trials.')
-                return page_obj,self.article_categories[page]
-            
-            except Exception as e:
-                if repeat < 2:
-                    print(f'Problem while collecting {page}: {e}...',end="")
-                    sleep(3)
-                    self.initWiki()
-                    sleep(3)
-                    print('Reconnected to Wikipkedia')
-        
-        self.log(f'Skipped article {page} because of connection problems.',level=0)
-        self.skipped_by_problem[page] = type(e) 
-        raise Exception('Connection to Wikipedia failed!')
-        
+        page_obj = self.html_wiki.page(page)
+        if not page_obj.exists():
+            raise Exception('Article does not exist!')
+        self.article_categories[page] = list(page_obj.categories.keys())
+        return page_obj,self.article_categories[page]
     
     def checkValid(self,p,total_cat,ignore,ignore_rules):
         """
@@ -363,44 +386,30 @@ class KnowledgeNet(DynamicClass):
             self.skipped_by_category[p] = bad_cat
             
         if len(ignore_by_rule) > 0 or len(bad_cat) > 0:
-            self.log('Skipped article %s because of categories'%(p),level=1)
+            self.log('Skipped article %s because of categories'%(p),level=2)
             return False
         
         return True
     
+    @repeated_trials(action="collecting")
     def collectArticle(self,page,links=False,text=False,page_obj=None,categories=[]):
         if page in self.pages.keys():
             return False
             
-        for repeat in range(3):
-            try:
-                if type(page_obj) == type(None):
-                    page_obj = self.html_wiki.page(page)
+        if type(page_obj) == type(None):
+            page_obj = self.html_wiki.page(page)
                     
-                if links:
-                    self.links[page] = list(page_obj.links.keys())
-                if text:
-                    text = self.extractText(page_obj) 
-                    if hasattr(self,'archive_path'):
-                        self.pages[page] = len(text)
-                        self.saveText(page,text,categories)
-                    else:
-                        self.pages[page] = text
+        if links:
+            self.links[page] = list(page_obj.links.keys())
+        if text:
+            text = self.extractText(page_obj) 
+            if hasattr(self,'archive_path'):
+                self.pages[page] = len(text)
+                self.saveText(page,text,categories)
+            else:
+                self.pages[page] = text
                         
-                return len(text)
-                
-            except Exception as e:
-                if repeat < 2:
-                    print(f'Problem while collecting {page}: {e}...',end="")
-                    sleep(3)
-                    self.initWiki()
-                    sleep(3)
-                    print('Reconnected to Wikipkedia')
-
-        self.log(f'Skipped article "{page}" because of connection problems.',level=1)
-        self.skipped_by_problem[page] = type(e)
-        raise Exception('Connection to Wikipedia failed!')
-
+        return len(text)
     
     def extractText(self,page):
         """
@@ -420,7 +429,17 @@ class KnowledgeNet(DynamicClass):
         return [lns for lns in lines if len(lns) > 3]
     
     def saveText(self,page,lines,categories):
-        title = re.sub('[^a-z0-9_-]','~',page.replace(' ','_'),flags=re.IGNORECASE)
+        """
+        Save the extracted text lines with categories as labels in either txt-files or a zip-archive.
+
+        Args:
+            page (str): Name of article (used for file name).
+
+            lines (list of str): Each paragraph is saved as a line.
+
+            categories (list of str): List of categories that are used as labels.
+        """
+        title = hashlib.md5(page.encode()).hexdigest() # re.sub('[^a-z0-9_-]','~',page.replace(' ','_'),flags=re.IGNORECASE)
         skip_label = len(self.categry_label)+1
         short_categories = [cat[skip_label:] for cat in categories]
 
@@ -441,6 +460,21 @@ class KnowledgeNet(DynamicClass):
                     out = line+'\n' if l < len(print_lines)-1 else line
                     fp.write(out)
         
+    def collectMissed(self,links=True,text=True):
+        as_file = lambda x:'%s.txt'%re.sub('[^a-z0-9_-]','~',x.replace(' ','_'),flags=re.IGNORECASE)
+        have = [file.name for file in os.scandir(self.archive_path)]
+        is_missing = lambda a: as_file(a) not in have and a not in self.skipped_by_rule.keys()
+        missing = [a for a in list(self.articles.keys())[:self.collected] if is_missing(a)]
+        print(len(missing))
+
+        for this_missing in missing:
+            page_obj,direct_cat = self.getPageAndCategories(this_missing)
+            label_cat = self.retrieveCategories(this_missing)
+            total_cat = set(direct_cat).union(label_cat)
+            if self.checkValid(this_missing,total_cat,[],[]):
+                self.collectArticle(this_missing,links=links,text=text,page_obj=page_obj,categories=label_cat)
+                print(f'collected {this_missing}')
+
     def resetCollection(self,ask_before_deleting=True):
         """
         Delete the files containing the text and categories. The article list and category-tree will be maintained.
